@@ -1,0 +1,146 @@
+name: Virtual Cloud Desktop (Ubuntu PC with Unity Hub)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  desktop:
+    name: Run Virtual Cloud Desktop
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Desktop, Unity Hub, Firefox & Tools
+        run: |
+          set -e
+          echo "Installing prerequisites..."
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 xfce4-goodies tightvncserver novnc websockify \
+            firefox dbus-x11 curl wget jq
+
+          echo "Installing Unity Hub..."
+          sudo install -d /etc/apt/keyrings
+          curl -fsSL https://hub.unity3d.com/linux/keys/public | sudo gpg --dearmor -o /etc/apt/keyrings/unityhub.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/unityhub.gpg] https://hub.unity3d.com/linux/repos/deb stable main" | sudo tee /etc/apt/sources.list.d/unityhub.list
+          sudo apt-get update
+          sudo apt-get install -y unityhub
+
+          echo "Installing Cloudflare Tunnel..."
+          curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cloudflared.deb
+          sudo dpkg -i /tmp/cloudflared.deb
+
+      - name: Configure VNC and Desktop
+        run: |
+          mkdir -p ~/.vnc
+          echo "123456" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+
+          cat << 'EOF' > ~/.vnc/xstartup
+          #!/bin/sh
+          unset SESSION_MANAGER
+          unset DBUS_SESSION_BUS_ADDRESS
+          startxfce4 &
+          sleep 3
+          unityhub --no-sandbox &
+          EOF
+          chmod +x ~/.vnc/xstartup
+
+          # Create desktop shortcut for Unity Hub
+          mkdir -p ~/Desktop
+          cat << 'EOF' > ~/Desktop/unityhub.desktop
+          [Desktop Entry]
+          Version=1.0
+          Type=Application
+          Name=Unity Hub
+          Exec=unityhub --no-sandbox
+          Icon=unityhub
+          Terminal=false
+          StartupNotify=true
+          EOF
+          chmod +x ~/Desktop/unityhub.desktop
+
+      - name: Start VNC Server and Web Access
+        run: |
+          # Start VNC server (display :1, 1280x720)
+          vncserver :1 -geometry 1280x720 -depth 24
+
+          # Start noVNC bridge on port 6080
+          websockify --web /usr/share/novnc/ 6080 localhost:5901 &
+
+          # Start Cloudflare Tunnel
+          cloudflared tunnel --url http://localhost:6080 > /tmp/tunnel.log 2>&1 &
+          sleep 6
+
+          # Extract tunnel URL
+          TUNNEL_URL=""
+          for i in {1..20}; do
+            TUNNEL_URL=$(grep -o 'https://[-a-zA-Z0-9.]*trycloudflare.com' /tmp/tunnel.log | head -n 1 || true)
+            if [ -n "$TUNNEL_URL" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "Failed to get tunnel URL, log dump:"
+            cat /tmp/tunnel.log
+            exit 1
+          fi
+
+          ACCESS_LINK="${TUNNEL_URL}/vnc.html?autoconnect=true&resize=scale"
+
+          echo "================================================================="
+          echo "🚀 VIRTUAL CLOUD DESKTOP IS READY!"
+          echo "👉 OPEN THIS URL ON YOUR PHONE:"
+          echo "$ACCESS_LINK"
+          echo "🔑 VNC Password: 123456"
+          echo "================================================================="
+
+          # Write to Step Summary
+          echo "## 🖥️ Virtual Cloud Desktop (Ubuntu PC)" >> $GITHUB_STEP_SUMMARY
+          echo "Unity Hub is running on this desktop. Open the link below on your phone:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔗 [👉 TAP HERE TO OPEN CLOUD DESKTOP](${ACCESS_LINK})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Password:** \`123456\` (if prompted)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Steps in Unity Hub:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Sign in with your Unity account." >> $GITHUB_STEP_SUMMARY
+          echo "2. Go to **Preferences (Gear Icon) -> Licenses -> Add -> Get a free personal license**." >> $GITHUB_STEP_SUMMARY
+          echo "3. Once activated, the system will automatically capture your license!" >> $GITHUB_STEP_SUMMARY
+
+      - name: Monitor and Capture License File
+        run: |
+          echo "Waiting for user to activate license in Unity Hub..."
+          TARGET_DIR="$HOME/.local/share/unity3d/Unity"
+          TARGET_FILE="$TARGET_DIR/Unity_lic.ulf"
+          mkdir -p "$TARGET_DIR" /tmp/license_out
+
+          # Wait for license file up to 2 hours
+          for minute in {1..120}; do
+            if [ -f "$TARGET_FILE" ] && [ -s "$TARGET_FILE" ]; then
+              echo "====================================================="
+              echo "🎉 SUCCESS! Unity License File detected!"
+              echo "Size: $(wc -c < "$TARGET_FILE") bytes"
+              echo "====================================================="
+              cp "$TARGET_FILE" /tmp/license_out/Unity_lic.ulf
+              echo "## 🎉 License Activated Successfully!" >> $GITHUB_STEP_SUMMARY
+              echo "License has been saved and will be uploaded as an artifact." >> $GITHUB_STEP_SUMMARY
+              exit 0
+            fi
+            echo "Time elapsed: ${minute}m - Waiting for license activation..."
+            sleep 60
+          done
+
+          echo "Timeout reached without license activation."
+          exit 1
+
+      - name: Upload License Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Unity-Personal-License
+          path: /tmp/license_out/Unity_lic.ulf
