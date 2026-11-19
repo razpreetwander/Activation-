@@ -1,22 +1,23 @@
-name: Get Unity License
+name: Get Unity License (.alf)
 
 on:
   workflow_dispatch:
 
 jobs:
   activation:
-    name: Generate Personal License
+    name: Generate Activation File
     runs-on: ubuntu-latest
+    container:
+      image: unityci/editor:ubuntu-2022.3.20f1-base-3
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Generate .alf file
+        run: |
+          unity-editor -batchmode -nographics -createManualActivationFile -logfile /dev/stdout || true
+          ls -la
 
-      - name: Get Unity License
-        uses: game-ci/unity-builder@v4
-        env:
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+      - name: Upload .alf Artifact
+        uses: actions/upload-artifact@v4
         with:
-          unityVersion: 2022.3.20f1
-          customParameters: -batchmode -nographics -quit
+          name: Unity-Activation-File
+          path: "*.alf"
           
